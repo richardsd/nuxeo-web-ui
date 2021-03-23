@@ -35,6 +35,7 @@ Then('I am on the {word} pill', function(pill) {
 When('I click {string} in the {word} tree', function(title, tab) {
   const section = this.ui.drawer._section(tab);
   section.waitForVisible();
+  driver.waitUntil(() => section.elements('.content a').some((e) => e.getText() === title));
   const el = section.elements('.content a').find((e) => e.getText() === title);
   el.waitForVisible();
   el.click();
@@ -101,7 +102,6 @@ Then('I can see {int} document(s)', function(numberOfResults) {
   // XXX temporary fix for visual issue while importing more than 1 document; will be fixed when NXP-28642 is tackled
   driver.refresh();
   const { displayMode } = results;
-  results.getResults(displayMode).waitForVisible();
   results.resultsCount(displayMode).should.equal(numberOfResults);
 });
 
