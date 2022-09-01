@@ -1,4 +1,5 @@
 # This workflow generates a new version of the catalog used by Nuxeo Studio Designer.
+# Note: some Catalog dependencies require Node 10.x to work.
 name: Designer Catalog Generator
 
 on:
@@ -13,15 +14,19 @@ on:
         default: 'maintenance-3.0.x'
         required: true
       classifier:
-        description: 'Classifier to generate a custom catalog version for testing purposes.'
+        description: 'Classifier to name a custom version of the catalog (used for testing purposes).'
         default: ''
         required: false
 
   release:
     types: [published]
 
+env:
+  ARTIFACT_ID: view-designer-catalog
+  GROUP_ID: org.nuxeo.web.ui.studio
+
 jobs:
-  build:
+  catalog:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -30,29 +35,41 @@ jobs:
         with:
           node-version: 10
 
+      - uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '11'
+
+      - name: 'Update settings.xml with server configuration'
+        run: |
+          echo '<settings>
+            <servers>
+              <server>
+                <id>maven-public</id>
+                <username>${{ secrets.PACKAGES_AUTH_USER }}</username>
+                <password>${{ secrets.PACKAGES_AUTH_TOKEN }}</password>
+              </server>
+            </servers>
+          </settings>' > ~/.m2/settings.xml
+
+      - name: Setup parameters (release)
+        if: github.event_name == 'release'
+        working-directory: packages/nuxeo-designer-catalog
+        run: |
+          echo "BRANCH_NAME=${GITHUB_HEAD_REF##*/}" >> $GITHUB_ENV
+          echo "TARGET_PLATFORM=11.3" >> $GITHUB_ENV
+
+      - name: Setup parameters (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "BRANCH_NAME=${{ github.event.inputs.branch_name }}" >> $GITHUB_ENV
+          echo "TARGET_PLATFORM=${{ github.event.inputs.target_platform }}" >> $GITHUB_ENV
+
       - name: Install dependencies
         working-directory: packages/nuxeo-designer-catalog
         run: | 
           npm install
           npm install -g gulp
-
-      - name: Setup parameters (release)
-        if: github.event_name == 'release'
-        run: |
-          BRANCH_NAME=maintenance-3.0.x
-          TARGET_PLATFORM=11.3
-          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
-          echo "RELEASE_NAME=${GITHUB_HEAD_REF##*/}" >> $GITHUB_ENV
-
-      - name: Setup parameters (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          BRANCH_NAME=${{ github.event.inputs.branch_name }}
-          TARGET_PLATFORM=${{ github.event.inputs.target_platform }}
-          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
-          echo "TARGET_PLATFORM=$TARGET_PLATFORM" >> $GITHUB_ENV
-          echo "BRANCH_NAME=$BRANCH_NAME"
-          echo "TARGET_PLATFORM=$TARGET_PLATFORM"
 
       - name: Generate catalog
         working-directory: packages/nuxeo-designer-catalog
@@ -61,21 +78,27 @@ jobs:
           gulp hints --tp $TARGET_PLATFORM
 
       - name: Bundle the catalog
-        working-directory: packages/nuxeo-designer-catalog/data/applications/nuxeo/${{ env.TARGET_PLATFORM }}
         run: |
-          zip -r catalog.zip nuxeo-web-ui data hints catalog.json
+          pushd packages/nuxeo-designer-catalog/data/applications/nuxeo/${{ env.TARGET_PLATFORM }}
+          echo "CATALOG_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f nuxeo-web-ui/pom.xml)${{ github.event.inputs.classifier }}" >> $GITHUB_ENV
+          zip -r $ARTIFACT_ID-$CATALOG_VERSION.zip nuxeo-web-ui data hints catalog.json
+          popd
 
       - name: Archive catalog
         uses: actions/upload-artifact@v3
         with:
           name: catalog
-          path: packages/nuxeo-designer-catalog/data/applications/nuxeo/$TARGET_PLATFORM/catalog.zip
+          path: packages/nuxeo-designer-catalog/data/applications/nuxeo/$TARGET_PLATFORM/$ARTIFACT_ID-$CATALOG_VERSION.zip
 
       - name: Upload catalog
         working-directory: packages/nuxeo-designer-catalog
         run: |
-          CATALOG_VERSION=$(mvn help:evaluate -Dexpression=project.version -f data/applications/nuxeo/$TARGET_PLATFORM/nuxeo-web-ui/pom.xml)
-          ./scripts/maven-deploy.sh data/applications/nuxeo/TARGET_PLATFORM $CATALOG_VERSION${{ github.event.inputs.classifier }}
+          MVN_REPO_ID=maven-public
+          MVN_REPO_URL=http://packages.nuxeo.com/nexus/content/repositories/maven-public
+
+          pushd data/applications/nuxeo/$TARGET_PLATFORM
+          mvn deploy:deploy-file -Dfile=$ARTIFACT_ID-$CATALOG_VERSION.zip -DgroupId=$GROUP_ID -DartifactId=$ARTIFACT_ID -Dversion=$CATALOG_VERSION -Dpackaging=zip -DrepositoryId=$MVN_REPO_ID -Durl=$MVN_REPO_URL
+          popd
 
       - name: Checkout NOS repository
         uses: actions/checkout@v3
@@ -92,7 +115,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.WEBUI_JX_BOT_GITHUB_ACTIONS_TOKEN }}
         run: | 
           git checkout -b designer-catalog-update
-          mvn versions:set-property -Dproperty=view.designer.catalog.3.0.x -DnewVersion=$RELEASE_NAME
+          mvn versions:set-property -Dproperty=view.designer.catalog.3.0.x -DnewVersion=$CATALOG_VERSION
           git add .
-          git commit -m "Update Designer catalog"
+          git commit -m "Update Designer catalog with version $CATALOG_VERSION"
+          git push origin designer-catalog-update
           gh pr create --base master --fill
